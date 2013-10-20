@@ -56,18 +56,21 @@ class Stream {
 	private $relPath; // rel path to users file dir
 	private $userId;
 	private $handle; // Resource returned by fopen
-	private $path;
-	private $readBuffer; // For streams that dont support seeking
 	private $meta = array(); // Header / meta for source stream
-	private $count;
 	private $writeCache;
 	private $size;
 	private $unencryptedSize;
 	private $publicKey;
-	private $keyfile;
 	private $encKeyfile;
-	private static $view; // a fsview object set to user dir
+	/**
+	 * @var \OC\Files\View
+	 */
 	private $rootView; // a fsview object set to '/'
+	/**
+	 * @var \OCA\Encryption\Session
+	 */
+	private $session;
+	private $privateKey;
 
 	/**
 	 * @param $path
@@ -81,6 +84,10 @@ class Stream {
 		if (!isset($this->rootView)) {
 			$this->rootView = new \OC_FilesystemView('/');
 		}
+
+		$this->session = new \OCA\Encryption\Session($this->rootView);
+
+		$this->privateKey = $this->session->getPrivateKey($this->userId);
 
 		$util = new Util($this->rootView, \OCP\USER::getUser());
 
@@ -109,6 +116,11 @@ class Stream {
 
 		} else {
 
+			if($this->privateKey === false) {
+				// if private key is not valid redirect user to a error page
+				\OCA\Encryption\Helper::redirectToErrorPage();
+			}
+
 			$this->size = $this->rootView->filesize($this->rawPath, $mode);
 		}
 
@@ -118,7 +130,7 @@ class Stream {
 
 		if (!is_resource($this->handle)) {
 
-			\OCP\Util::writeLog('files_encryption', 'failed to open file "' . $this->rawPath . '"', \OCP\Util::ERROR);
+			\OCP\Util::writeLog('Encryption library', 'failed to open file "' . $this->rawPath . '"', \OCP\Util::ERROR);
 
 		} else {
 
@@ -156,16 +168,16 @@ class Stream {
 
 			// $count will always be 8192 https://bugs.php.net/bug.php?id=21641
 			// This makes this function a lot simpler, but will break this class if the above 'bug' gets 'fixed'
-			\OCP\Util::writeLog('files_encryption', 'PHP "bug" 21641 no longer holds, decryption system requires refactoring', \OCP\Util::FATAL);
+			\OCP\Util::writeLog('Encryption library', 'PHP "bug" 21641 no longer holds, decryption system requires refactoring', \OCP\Util::FATAL);
 
 			die();
 
 		}
 
 		// Get the data from the file handle
-		$data = fread($this->handle, 8192);
+		$data = fread($this->handle, $count);
 
-		$result = '';
+		$result = null;
 
 		if (strlen($data)) {
 
@@ -175,10 +187,11 @@ class Stream {
 				throw new \Exception(
 					'Encryption key not found for "' . $this->rawPath . '" during attempted read via stream');
 
-			}
+			} else {
 
-			// Decrypt data
-			$result = Crypt::symmetricDecryptFileContent($data, $this->plainKey);
+				// Decrypt data
+				$result = Crypt::symmetricDecryptFileContent($data, $this->plainKey);
+			}
 
 		}
 
@@ -228,13 +241,18 @@ class Stream {
 		// If a keyfile already exists
 		if ($this->encKeyfile) {
 
-			$session = new \OCA\Encryption\Session( $this->rootView );
+			// if there is no valid private key return false
+			if ($this->privateKey === false) {
 
-			$privateKey = $session->getPrivateKey($this->userId);
+				// if private key is not valid redirect user to a error page
+				\OCA\Encryption\Helper::redirectToErrorPage();
+
+				return false;
+			}
 
 			$shareKey = Keymanager::getShareKey($this->rootView, $this->userId, $this->relPath);
 
-			$this->plainKey = Crypt::multiKeyDecrypt($this->encKeyfile, $shareKey, $privateKey);
+			$this->plainKey = Crypt::multiKeyDecrypt($this->encKeyfile, $shareKey, $this->privateKey);
 
 			return true;
 
@@ -257,9 +275,15 @@ class Stream {
 	 */
 	public function stream_write($data) {
 
-		// Disable the file proxies so that encryption is not 
-		// automatically attempted when the file is written to disk - 
-		// we are handling that separately here and we don't want to 
+		// if there is no valid private key return false
+		if ($this->privateKey === false) {
+			$this->size = 0;
+			return strlen($data);
+		}
+
+		// Disable the file proxies so that encryption is not
+		// automatically attempted when the file is written to disk -
+		// we are handling that separately here and we don't want to
 		// get into an infinite loop
 		$proxyStatus = \OC_FileProxy::$enabled;
 		\OC_FileProxy::$enabled = false;
@@ -272,7 +296,7 @@ class Stream {
 		$pointer = ftell($this->handle);
 
 		// Get / generate the keyfile for the file we're handling
-		// If we're writing a new file (not overwriting an existing 
+		// If we're writing a new file (not overwriting an existing
 		// one), save the newly generated keyfile
 		if (!$this->getKey()) {
 
@@ -280,7 +304,7 @@ class Stream {
 
 		}
 
-		// If extra data is left over from the last round, make sure it 
+		// If extra data is left over from the last round, make sure it
 		// is integrated into the next 6126 / 8192 block
 		if ($this->writeCache) {
 
@@ -305,12 +329,12 @@ class Stream {
 			if ($remainingLength < 6126) {
 
 				// Set writeCache to contents of $data
-				// The writeCache will be carried over to the 
-				// next write round, and added to the start of 
-				// $data to ensure that written blocks are 
-				// always the correct length. If there is still 
-				// data in writeCache after the writing round 
-				// has finished, then the data will be written 
+				// The writeCache will be carried over to the
+				// next write round, and added to the start of
+				// $data to ensure that written blocks are
+				// always the correct length. If there is still
+				// data in writeCache after the writing round
+				// has finished, then the data will be written
 				// to disk by $this->flush().
 				$this->writeCache = $data;
 
@@ -324,7 +348,7 @@ class Stream {
 
 				$encrypted = $this->preWriteEncrypt($chunk, $this->plainKey);
 
-				// Write the data chunk to disk. This will be 
+				// Write the data chunk to disk. This will be
 				// attended to the last data chunk if the file
 				// being handled totals more than 6126 bytes
 				fwrite($this->handle, $encrypted);
@@ -424,11 +448,34 @@ class Stream {
 
 		$this->flush();
 
+		// if there is no valid private key return false
+		if ($this->privateKey === false) {
+
+				// cleanup
+				if ($this->meta['mode'] !== 'r' && $this->meta['mode'] !== 'rb') {
+
+					// Disable encryption proxy to prevent recursive calls
+					$proxyStatus = \OC_FileProxy::$enabled;
+					\OC_FileProxy::$enabled = false;
+
+					if ($this->rootView->file_exists($this->rawPath) && $this->size === 0) {
+						$this->rootView->unlink($this->rawPath);
+					}
+
+					// Re-enable proxy - our work is done
+					\OC_FileProxy::$enabled = $proxyStatus;
+				}
+
+			// if private key is not valid redirect user to a error page
+			\OCA\Encryption\Helper::redirectToErrorPage();
+		}
+
 		if (
 			$this->meta['mode'] !== 'r'
 			and $this->meta['mode'] !== 'rb'
 				and $this->size > 0
 		) {
+
 			// Disable encryption proxy to prevent recursive calls
 			$proxyStatus = \OC_FileProxy::$enabled;
 			\OC_FileProxy::$enabled = false;
@@ -450,16 +497,14 @@ class Stream {
 			// Encrypt enc key for all sharing users
 			$this->encKeyfiles = Crypt::multiKeyEncrypt($this->plainKey, $publicKeys);
 
-			$view = new \OC_FilesystemView('/');
-
 			// Save the new encrypted file key
 			Keymanager::setFileKey($this->rootView, $this->relPath, $this->userId, $this->encKeyfiles['data']);
 
 			// Save the sharekeys
-			Keymanager::setShareKeys($view, $this->relPath, $this->encKeyfiles['keys']);
+			Keymanager::setShareKeys($this->rootView, $this->relPath, $this->encKeyfiles['keys']);
 
 			// get file info
-			$fileInfo = $view->getFileInfo($this->rawPath);
+			$fileInfo = $this->rootView->getFileInfo($this->rawPath);
 			if (!is_array($fileInfo)) {
 				$fileInfo = array();
 			}
@@ -473,7 +518,8 @@ class Stream {
 			$fileInfo['unencrypted_size'] = $this->unencryptedSize;
 
 			// set fileinfo
-			$view->putFileInfo($this->rawPath, $fileInfo);
+			$this->rootView->putFileInfo($this->rawPath, $fileInfo);
+
 		}
 
 		return fclose($this->handle);

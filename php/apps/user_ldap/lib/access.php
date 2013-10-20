@@ -562,7 +562,7 @@ abstract class Access {
 
 		$sqlAdjustment = '';
 		$dbtype = \OCP\Config::getSystemValue('dbtype');
-		if($dbtype == 'mysql') {
+		if($dbtype == 'mysql' || $dbtype == 'oci') {
 			$sqlAdjustment = 'FROM DUAL';
 		}
 
@@ -578,13 +578,11 @@ abstract class Access {
 		');
 
 		//feed the DB
-		$res = $insert->execute(array($dn, $ocname, $this->getUUID($dn), $dn, $ocname));
+		$insRows = $insert->execute(array($dn, $ocname, $this->getUUID($dn), $dn, $ocname));
 
-		if(\OCP\DB::isError($res)) {
+		if(\OCP\DB::isError($insRows)) {
 			return false;
 		}
-
-		$insRows = $res->numRows();
 
 		if($insRows == 0) {
 			return false;
@@ -993,7 +991,7 @@ abstract class Access {
 	 * internally we store them for usage in LDAP filters
 	 */
 	private function DNasBaseParameter($dn) {
-		return str_replace('\\5c', '\\', $dn);
+		return str_ireplace('\\5c', '\\', $dn);
 	}
 
 	/**

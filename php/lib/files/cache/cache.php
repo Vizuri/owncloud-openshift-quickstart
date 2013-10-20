@@ -106,10 +106,13 @@ class Cache {
 	 * get the stored metadata of a file or folder
 	 *
 	 * @param string/int $file
-	 * @return array
+	 * @return array | false
 	 */
 	public function get($file) {
 		if (is_string($file) or $file == '') {
+			// normalize file
+			$file = $this->normalize($file);
+
 			$where = 'WHERE `storage` = ? AND `path_hash` = ?';
 			$params = array($this->numericId, md5($file));
 		} else { //file id
@@ -121,6 +124,12 @@ class Cache {
 			 FROM `*PREFIX*filecache` ' . $where);
 		$result = $query->execute($params);
 		$data = $result->fetchRow();
+
+		//FIXME hide this HACK in the next database layer, or just use doctrine and get rid of MDB2 and PDO
+		//PDO returns false, MDB2 returns null, oracle always uses MDB2, so convert null to false
+		if ($data === null) {
+			$data = false;
+		}
 
 		//merge partial data
 		if (!$data and  is_string($file)) {
@@ -153,8 +162,11 @@ class Cache {
 		if ($fileId > -1) {
 			$query = \OC_DB::prepare(
 				'SELECT `fileid`, `storage`, `path`, `parent`, `name`, `mimetype`, `mimepart`, `size`, `mtime`, `encrypted`, `unencrypted_size` , `etag`
-			 	 FROM `*PREFIX*filecache` WHERE parent = ? ORDER BY `name` ASC');
+				 FROM `*PREFIX*filecache` WHERE `parent` = ? ORDER BY `name` ASC');
 			$result = $query->execute(array($fileId));
+			if (\OC_DB::isError($result)) {
+				\OCP\Util::writeLog('cache', 'getFolderContents failed: ' . $result->getMessage(), \OCP\Util::ERROR);
+			}
 			$files = $result->fetchAll();
 			foreach ($files as &$file) {
 				$file['mimetype'] = $this->getMimetype($file['mimetype']);
@@ -179,6 +191,9 @@ class Cache {
 			$this->update($id, $data);
 			return $id;
 		} else {
+			// normalize file
+			$file = $this->normalize($file);
+
 			if (isset($this->partial[$file])) { //add any saved partial data
 				$data = array_merge($this->partial[$file], $data);
 				unset($this->partial[$file]);
@@ -206,7 +221,7 @@ class Cache {
 				. ' VALUES(' . implode(', ', $valuesPlaceholder) . ')');
 			$result = $query->execute($params);
 			if (\OC_DB::isError($result)) {
-				\OCP\Util::writeLog('cache', 'Insert to cache failed: ' . $result, \OCP\Util::ERROR);
+				\OCP\Util::writeLog('cache', 'Insert to cache failed: ' . $result->getMessage(), \OCP\Util::ERROR);
 			}
 
 			return (int)\OC_DB::insertid('*PREFIX*filecache');
@@ -220,11 +235,21 @@ class Cache {
 	 * @param array $data
 	 */
 	public function update($id, array $data) {
+		if(isset($data['path'])) {
+			// normalize path
+			$data['path'] = $this->normalize($data['path']);
+		}
+
+		if(isset($data['name'])) {
+			// normalize path
+			$data['name'] = $this->normalize($data['name']);
+		}
+
 		list($queryParts, $params) = $this->buildParts($data);
 		$params[] = $id;
 
 		$query = \OC_DB::prepare('UPDATE `*PREFIX*filecache` SET ' . implode(' = ?, ', $queryParts) . '=?'
-			. ' WHERE fileid = ?');
+			. ' WHERE `fileid` = ?');
 		$query->execute($params);
 	}
 
@@ -262,6 +287,9 @@ class Cache {
 	 * @return int
 	 */
 	public function getId($file) {
+		// normalize path
+		$file = $this->normalize($file);
+
 		$pathHash = md5($file);
 
 		$query = \OC_DB::prepare('SELECT `fileid` FROM `*PREFIX*filecache` WHERE `storage` = ? AND `path_hash` = ?');
@@ -329,6 +357,10 @@ class Cache {
 	 * @param string $target
 	 */
 	public function move($source, $target) {
+		// normalize source and target
+		$source = $this->normalize($source);
+		$target = $this->normalize($target);
+
 		$sourceData = $this->get($source);
 		$sourceId = $sourceData['fileid'];
 		$newParentId = $this->getParentId($target);
@@ -356,10 +388,10 @@ class Cache {
 	 * remove all entries for files that are stored on the storage from the cache
 	 */
 	public function clear() {
-		$query = \OC_DB::prepare('DELETE FROM `*PREFIX*filecache` WHERE storage = ?');
+		$query = \OC_DB::prepare('DELETE FROM `*PREFIX*filecache` WHERE `storage` = ?');
 		$query->execute(array($this->numericId));
 
-		$query = \OC_DB::prepare('DELETE FROM `*PREFIX*storages` WHERE id = ?');
+		$query = \OC_DB::prepare('DELETE FROM `*PREFIX*storages` WHERE `id` = ?');
 		$query->execute(array($this->storageId));
 	}
 
@@ -369,9 +401,15 @@ class Cache {
 	 * @return int, Cache::NOT_FOUND, Cache::PARTIAL, Cache::SHALLOW or Cache::COMPLETE
 	 */
 	public function getStatus($file) {
+		// normalize file
+		$file = $this->normalize($file);
+
 		$pathHash = md5($file);
 		$query = \OC_DB::prepare('SELECT `size` FROM `*PREFIX*filecache` WHERE `storage` = ? AND `path_hash` = ?');
 		$result = $query->execute(array($this->numericId, $pathHash));
+		if( \OC_DB::isError($result)) {
+			\OCP\Util::writeLog('cache', 'get status failed: ' . $result->getMessage(), \OCP\Util::ERROR);
+		}
 		if ($row = $result->fetchRow()) {
 			if ((int)$row['size'] === -1) {
 				return self::SHALLOW;
@@ -394,6 +432,9 @@ class Cache {
 	 * @return array of file data
 	 */
 	public function search($pattern) {
+		// normalize pattern
+		$pattern = $this->normalize($pattern);
+
 		$query = \OC_DB::prepare('
 			SELECT `fileid`, `storage`, `path`, `parent`, `name`, `mimetype`, `mimepart`, `size`, `mtime`, `encrypted`, `unencrypted_size`, `etag`
 			FROM `*PREFIX*filecache` WHERE `name` LIKE ? AND `storage` = ?'
@@ -458,27 +499,27 @@ class Cache {
 	 * @return int
 	 */
 	public function calculateFolderSize($path) {
-		$id = $this->getId($path);
-		if ($id === -1) {
-			return 0;
-		}
-		$query = \OC_DB::prepare('SELECT `size` FROM `*PREFIX*filecache` WHERE `parent` = ? AND `storage` = ?');
-		$result = $query->execute(array($id, $this->numericId));
 		$totalSize = 0;
-		$hasChilds = 0;
-		while ($row = $result->fetchRow()) {
-			$hasChilds = true;
-			$size = (int)$row['size'];
-			if ($size === -1) {
-				$totalSize = -1;
-				break;
-			} else {
-				$totalSize += $size;
+		$entry = $this->get($path);
+		if ($entry && $entry['mimetype'] === 'httpd/unix-directory') {
+			$id = $entry['fileid'];
+			$query = \OC_DB::prepare('SELECT SUM(`size`), MIN(`size`) FROM `*PREFIX*filecache` '.
+				'WHERE `parent` = ? AND `storage` = ?');
+			$result = $query->execute(array($id, $this->getNumericStorageId()));
+			if ($row = $result->fetchRow()) {
+				list($sum, $min) = array_values($row);
+				$sum = (int)$sum;
+				$min = (int)$min;
+				if ($min === -1) {
+					$totalSize = $min;
+				} else {
+					$totalSize = $sum;
+				}
+				if ($entry['size'] !== $totalSize) {
+					$this->update($id, array('size' => $totalSize));
+				}
+				
 			}
-		}
-
-		if ($hasChilds) {
-			$this->update($id, array('size' => $totalSize));
 		}
 		return $totalSize;
 	}
@@ -509,8 +550,11 @@ class Cache {
 	 */
 	public function getIncomplete() {
 		$query = \OC_DB::prepare('SELECT `path` FROM `*PREFIX*filecache`'
-			. ' WHERE `storage` = ? AND `size` = -1 ORDER BY `fileid` DESC LIMIT 1');
+			. ' WHERE `storage` = ? AND `size` = -1 ORDER BY `fileid` DESC',1);
 		$result = $query->execute(array($this->numericId));
+		if (\OC_DB::isError($result)) {
+			\OCP\Util::writeLog('cache', 'getIncomplete failed: ' . $result->getMessage(), \OCP\Util::ERROR);
+		}
 		if ($row = $result->fetchRow()) {
 			return $row['path'];
 		} else {
@@ -541,4 +585,13 @@ class Cache {
 			return null;
 		}
 	}
-}
+
+	/**
+	 * normalize the given path
+	 * @param $path
+	 * @return string
+	 */
+	public function normalize($path) {
+
+		return \OC_Util::normalizeUnicode($path);
+	}}

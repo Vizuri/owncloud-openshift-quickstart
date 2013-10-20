@@ -48,7 +48,7 @@
 			</div>
 		</div>
 		<div id="file_action_panel"></div>
-	<?php else:?>
+	<?php elseif( !$_['isPublic'] ):?>
 		<div class="actions"><input type="button" disabled value="<?php p($l->t('You don’t have write permissions here.'))?>"></div>
 		<input type="hidden" name="dir" value="<?php p($_['dir']) ?>" id="dir">
 	<?php endif;?>
@@ -59,7 +59,7 @@
 	<div id="emptyfolder"><?php p($l->t('Nothing in here. Upload something!'))?></div>
 <?php endif; ?>
 
-<table id="filestable">
+<table id="filestable" data-allow-public-upload="<?php p($_['publicUploadEnabled'])?>">
 	<thead>
 		<tr>
 			<th id='headerName'>

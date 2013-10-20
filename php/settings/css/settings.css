@@ -57,6 +57,8 @@ select.quota.active { background: #fff; }
 #newuser .multiselect { top:1px; }
 #headerGroups, #headerSubAdmins, #headerQuota { padding-left:18px; }
 
+.ie8 table.hascontrols{border-collapse:collapse;width: 100%;}
+.ie8 table.hascontrols tbody tr{border-collapse:collapse;border: 1px solid #ddd !important;}
 
 /* APPS */
 .appinfo { margin: 1em; }
@@ -91,3 +93,7 @@ table.shareAPI td { padding-bottom: 0.8em; }
 /* HELP */
 .pressed {background-color:#DDD;}
 
+/* fix hidden groups in firefox */
+ul.multiselectoptions > li {
+	overflow: visible !important;
+}

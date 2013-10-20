@@ -1,4 +1,5 @@
 <?php
+
 /**
  * Class for utility functions
  *
@@ -76,7 +77,7 @@ class OC_Util {
 	public static function getVersion() {
 		// hint: We only can count up. Reset minor/patchlevel when
 		// updating major/minor version number.
-		return array(5, 00, 12);
+		return array(5, 00, 22);
 	}
 
 	/**
@@ -84,7 +85,7 @@ class OC_Util {
 	 * @return string
 	 */
 	public static function getVersionString() {
-		return '5.0.7';
+		return '5.0.12';
 	}
 
 	/**
@@ -168,25 +169,30 @@ class OC_Util {
 	public static function checkServer() {
 		$errors=array();
 
+		$defaults = new \OC_Defaults();
+
 		$web_server_restart= false;
 		//check for database drivers
 		if(!(is_callable('sqlite_open') or class_exists('SQLite3'))
 			and !is_callable('mysql_connect')
-			and !is_callable('pg_connect')) {
+			and !is_callable('pg_connect')
+			and !is_callable('oci_connect')) {
 			$errors[]=array('error'=>'No database drivers (sqlite, mysql, or postgresql) installed.',
 				'hint'=>'');//TODO: sane hint
 			$web_server_restart= true;
 		}
 
 		//common hint for all file permissons error messages
-		$permissionsHint='Permissions can usually be fixed by giving the webserver write access'
-			.' to the ownCloud directory';
+		$permissionsHint = 'Permissions can usually be fixed by '
+			.'<a href="' . $defaults->getDocBaseUrl() . '/server/5.0/admin_manual/installation/installation_source.html#set-the-directory-permissions" target="_blank">giving the webserver write access to the root directory</a>.';
 
 		// Check if config folder is writable.
 		if(!is_writable(OC::$SERVERROOT."/config/") or !is_readable(OC::$SERVERROOT."/config/")) {
-			$errors[]=array('error'=>"Can't write into config directory 'config'",
-				'hint'=>'You can usually fix this by giving the webserver user write access'
-					.' to the config directory in owncloud');
+			$errors[] = array(
+				'error' => "Can't write into config directory",
+				'hint' => 'This can usually be fixed by '
+					.'<a href="' . $defaults->getDocBaseUrl() . '/server/5.0/admin_manual/installation/installation_source.html#set-the-directory-permissions" target="_blank">giving the webserver write access to the config directory</a>.'
+				);
 		}
 
 		// Check if there is a writable install folder.
@@ -194,9 +200,12 @@ class OC_Util {
 			if( OC_App::getInstallPath() === null
 				|| !is_writable(OC_App::getInstallPath())
 				|| !is_readable(OC_App::getInstallPath()) ) {
-				$errors[]=array('error'=>"Can't write into apps directory",
-					'hint'=>'You can usually fix this by giving the webserver user write access'
-					.' to the apps directory in owncloud or disabling the appstore in the config file.');
+				$errors[] = array(
+					'error' => "Can't write into apps directory",
+					'hint' => 'This can usually be fixed by '
+						.'<a href="' . $defaults->getDocBaseUrl() . '/server/5.0/admin_manual/installation/installation_source.html#set-the-directory-permissions" target="_blank">giving the webserver write access to the apps directory</a> '
+						.'or disabling the appstore in the config file.'
+					);
 			}
 		}
 		$CONFIG_DATADIRECTORY = OC_Config::getValue( "datadirectory", OC::$SERVERROOT."/data" );
@@ -206,10 +215,11 @@ class OC_Util {
 			if ($success) {
 				$errors = array_merge($errors, self::checkDataDirectoryPermissions($CONFIG_DATADIRECTORY));
 			} else {
-				$errors[]=array('error'=>"Can't create data directory (".$CONFIG_DATADIRECTORY.")",
-					'hint'=>"You can usually fix this by giving the webserver write access to the ownCloud directory '"
-						.OC::$SERVERROOT."' (in a terminal, use the command "
-						."'chown -R www-data:www-data /path/to/your/owncloud/install/data' ");
+				$errors[] = array(
+					'error' => "Can't create data directory (".$CONFIG_DATADIRECTORY.")",
+					'hint' => 'This can usually be fixed by '
+					.'<a href="' . $defaults->getDocBaseUrl() . '/server/5.0/admin_manual/installation/installation_source.html#set-the-directory-permissions" target="_blank">giving the webserver write access to the root directory</a>.'
+				);
 			}
 		} else if(!is_writable($CONFIG_DATADIRECTORY) or !is_readable($CONFIG_DATADIRECTORY)) {
 			$errors[]=array('error'=>'Data directory ('.$CONFIG_DATADIRECTORY.') not writable by ownCloud',
@@ -302,9 +312,27 @@ class OC_Util {
 	}
 
 	/**
-	* Check for correct file permissions of data directory
-	* @return array arrays with error messages and hints
-	*/
+	 * @brief check if there are still some encrypted files stored
+	 * @return boolean
+	 */
+	public static function encryptedFiles() {
+		//check if encryption was enabled in the past
+		$encryptedFiles = false;
+		if (OC_App::isEnabled('files_encryption') === false) {
+			$view = new OC\Files\View('/' . OCP\User::getUser());
+			if ($view->file_exists('/files_encryption/keyfiles')) {
+				$encryptedFiles = true;
+			}
+		}
+
+		return $encryptedFiles;
+	}
+
+	/**
+	 * @brief Check for correct file permissions of data directory
+	 * @paran string $dataDirectory
+	 * @return array arrays with error messages and hints
+	 */
 	public static function checkDataDirectoryPermissions($dataDirectory) {
 		$errors = array();
 		if (stristr(PHP_OS, 'WIN')) {
@@ -344,6 +372,7 @@ class OC_Util {
 		}
 
 		$parameters['alt_login'] = OC_App::getAlternativeLogIns();
+		$parameters['rememberLoginAllowed'] = self::rememberLoginAllowed();
 		OC_Template::printGuestPage("", "login", $parameters);
 	}
 
@@ -382,7 +411,28 @@ class OC_Util {
 	}
 
 	/**
-	 * Check if the user is a subadmin, redirects to home if not
+	 * Check if it is allowed to remember login.
+	 *
+	 * @note Every app can set 'rememberlogin' to 'false' to disable the remember login feature
+	 *
+	 * @return bool
+	 */
+	public static function rememberLoginAllowed() {
+
+		$apps = OC_App::getEnabledApps();
+
+		foreach ($apps as $app) {
+			$appInfo = OC_App::getAppInfo($app);
+			if (isset($appInfo['rememberlogin']) && $appInfo['rememberlogin'] === 'false') {
+				return false;
+			}
+
+		}
+		return true;
+	}
+
+	/**
+	 * @brief Check if the user is a subadmin, redirects to home if not
 	 * @return array $groups where the current user is subadmin
 	 */
 	public static function checkSubAdminUser() {
@@ -526,7 +576,6 @@ class OC_Util {
 		return $value;
 	}
 
-
 	/**
 	 * Check if the htaccess file is working by creating a test file in the data directory and trying to access via http
 	 */
@@ -667,7 +716,6 @@ class OC_Util {
 			}
 
 		}
-
 	}
 
 	/**
@@ -812,10 +860,10 @@ class OC_Util {
 	 * @return string the theme
 	 */
 	public static function getTheme() {
-		$theme = OC_Config::getValue("theme");
+		$theme = OC_Config::getValue("theme", '');
 
-		if(is_null($theme)) {
-			
+		if($theme === '') {
+
 			if(is_dir(OC::$SERVERROOT . '/themes/default')) {
 				$theme = 'default';
 			}
@@ -825,5 +873,43 @@ class OC_Util {
 		return $theme;
 	}
 
+	/**
+	 * Clear the opcode cache if one exists
+	 * This is necessary for writing to the config file
+	 * in case the opcode cache doesn't revalidate files
+	 */
+	public static function clearOpcodeCache() {
+		// APC
+		if (function_exists('apc_clear_cache')) {
+			apc_clear_cache();
+		}
+		// Zend Opcache
+		if (function_exists('accelerator_reset')) {
+			accelerator_reset();
+		}
+		// XCache
+		if (function_exists('xcache_clear_cache')) {
+			xcache_clear_cache(XC_TYPE_VAR, 0);
+		}
+	}
 
+	/**
+	 * Normalize a unicode string
+	 * @param string $value a not normalized string
+	 * @return bool|string
+	 */
+	public static function normalizeUnicode($value) {
+		require_once 'Patchwork/PHP/Shim/Normalizer.php';
+
+		if(class_exists('Patchwork\PHP\Shim\Normalizer')) {
+			$normalizedValue = \Patchwork\PHP\Shim\Normalizer::normalize($value);
+			if($normalizedValue === false) {
+				\OC_Log::write( 'core', 'normalizing failed for "' . $value . '"', \OC_Log::WARN);
+			} else {
+				$value = $normalizedValue;
+			}
+		}
+
+		return $value;
+	}
 }
